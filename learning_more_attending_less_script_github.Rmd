@@ -1,0 +1,459 @@
+---
+title: "Frowney"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+Pre-process data
+```{r clear environment}
+rm(list = ls())
+```
+
+```{r load packages, ggtheme and data}
+library(roll); library(broom); library(lme4); library(lmerTest); library(dplyr); library(data.table); library(ggplot2); library(dtplyr); library(tidyr);library(reshape2); library(ggbeeswarm); library(tibble); library(optimx); library(Hmisc); library(DescTools);library(lm.beta); library(hausekeep); library(tidyverse); library(imputeTS)
+
+ggtheme = theme(plot.caption = element_text(hjust = -.2), 
+        panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white", colour = NA),
+        axis.line.x = element_line(size = 1, linetype = "solid", colour = "black"), 
+        axis.line.y = element_line(size = 1, linetype = "solid", colour = "black"),
+        axis.text.x = element_text(size = 17, colour = 'black'), 
+        axis.text.y = element_text(size = 17, colour = 'black'), 
+        plot.title = element_text(size = 17, hjust = 0.5),
+        text = element_text(size = 17), panel.spacing.x = unit(1, "lines"),
+        legend.key = element_blank(), legend.key.height = unit(2, 'line')) 
+```
+
+```{r load data}
+df = fread("learning_more_attending_less.csv")
+```
+
+```{r explore data}
+df= tbl_dt(df)
+names(df)
+df[, unique(age_group)]
+df[, unique(age_group)]
+df[, unique(participant)]
+```
+
+```{r check for outliers}
+mean_acc_task.p <- df[, .(acc = mean(acc)), by=participant] #mean accuracy across the task
+mean_acc <- mean_acc_task.p[, mean(acc)]
+sd_acc_task = mean_acc_task.p[, sd(acc)] #sd across the task
+
+low_cutoff = mean_acc - sd_acc_task *  3 #lower bound for exlcluding participant based on accuracy
+high_cutoff = mean_acc + sd_acc_task * 3 # won't exclude anyone for high cutoff 
+
+mean_acc_task.p[acc > high_cutoff, ]
+mean_acc_task.p[acc < low_cutoff, ]
+```
+
+```{r scale variables}
+df[, total_trial_numC := scale(total_trial_num, scale = F), by=participant]
+```
+
+```{r remove linear drift in RT}
+df[!is.na(response_time), 
+     summaryh(lm(response_time ~ trial_in_block)), by=block_num][term == "trial_in_block"] #since people take breaks, look at relationship by block
+#at participant level visualize raw RT df
+participants  = df[, unique(participant)]
+#keep running - sample function will randomly select within participant sample
+ggplot(df[ participant %in% c(sample(participants, 10))], aes(total_trial_num, response_time)) +
+  geom_point() +
+  ggtheme +
+  #stat_smooth(method = 'lm', formula = y ~ poly(x,2), se = TRUE) +
+  facet_wrap(~participant)
+```
+
+```{r residualize RT by block}
+df[!is.na(response_time), 
+     rtResidualC := residuals(lm(response_time ~ trial_in_block)), by=.(participant, block_num)]
+
+#add means back into the data
+mean_rt.p<- df[, .(mean_rt = mean(response_time, na.rm=T)), by = .(participant)]#removed by block here
+df <- left_join(df, mean_rt.p)
+df[, rtResidual := rtResidualC + mean_rt]
+df[, .(mean(response_time, na.rm=T), mean(rtResidual, na.rm=T)), by = .(participant, block_num)]
+df[, .(response_time, rtResidual)]
+df[, rtResidual_ms := rtResidual * 1000]
+```
+
+Determine whether people show learning using measures of RT and accuracy
+```{r calculate mean RT by trial type}
+df[response_time < 3 & acc == 1, mean(rtResidual_ms, na.rm=T)]
+df[response_time < 3 & acc == 1, median(rtResidual_ms, na.rm=T)]
+df[response_time < 3 & acc == 1, mean(rtResidual_ms, na.rm=T), by = trialtype2]
+```
+
+```{r RT ~ trial type}
+df$trialtype2 <- relevel(as.factor(df$trialtype2), ref = "inconsistent")
+learning_model_rt = lmer(rtResidual ~ trialtype2  + (1|participant), data = df[acc == 1]);summaryh(learning_model_rt)
+```
+
+```{r accuracy by trial type }
+accuracy_trialtype = df[, .(acc = mean(acc, na.rm=T)), by = .(participant, trialtype2)]
+accuracy_trialtype[, mean(acc), by = trialtype2]
+```
+
+```{r accuracy ~ trial type}
+df$trialtype2 <- relevel(as.factor(df$trialtype2), ref = "inconsistent")
+learning_model_acc = glmer(acc ~ trialtype2  + (trialtype2|participant), family  = "binomial", data = df);summaryh(learning_model_acc)
+```
+
+```{r skip: alternative models for modelling RT (due to singular fits in random slope model)}
+source('/Desktop/summaryBetas.R')
+#use response time rather than rt residuals
+df$trialtype2 = relevel(df$trialtype2, ref = "consistent")
+learning_model3 = lmer(response_time ~ trialtype2  + trial_in_block + (1|participant), df = df[acc == 1])
+summary(learning_model3) #this model doesn't have a singular fit - maybe use this? Something about having all participnats means at zero iwth RT residuals leads to singular fit; Either use this model or extra beta coefficients (below); Henrik Singmann says don't worry about convergence issues-but don't report model with singular fit
+
+df$trialtype2 = relevel(df$trialtype2, ref = "inconsistent")
+learning_model3b = lmer(response_time ~ trialtype2  + trial_in_block + (1|participant), df = df[acc == 1])
+summary(learning_model3b) #this model doesn't have a singular fit - maybe use this? Something about having all participnats means at zero iwth RT residuals leads to singular fit; Either use this model or extra beta coefficients (below); Henrik Singmann says don't worry about convergence issues-but don't report model with singular fit
+
+
+learning_model2 = lmer(response_time ~ trialtype2  + trial_in_block + (trialtype2|participant), df = df[acc == 1])
+summary(learning_model2)
+
+
+#Alternative option:
+#extract beta values and compare to zero
+df$trialtype2 = relevel(df$trialtype2, ref = "consistent")
+coefs_beta_learning_base_consistent = df[acc == 1, .(term = summaryh(lm(rtResidual ~ trialtype2))$term, coefs = coef(lm(rtResidual ~ trialtype2))), by = participant]
+confirm_test = df[acc == 1, summaryh(lm(rtResidual ~ trialtype2)), by = participant]
+coefs_beta_learning_base_consistent = left_join(coefs_beta_learning_base_consistent, confirm_test)
+
+#re-level variables to compare trials to inconsistent
+df$trialtype2 = relevel(as.factor(df$trialtype2), ref = "inconsistent")
+coefs_beta_learning_base_inconsistent = df[acc == 1, .(term = summaryh(lm(rtResidual ~ trialtype2))$term, coefs = coef(lm(rtResidual ~ trialtype2))), by = participant]
+confirm_test_inconsistent = df[acc == 1, summaryh(lm(rtResidual ~ trialtype2)), by = participant]
+coefs_beta_learning_base_inconsistent = left_join(coefs_beta_learning_base_inconsistent, confirm_test_inconsistent)
+coefs_beta_learning_base_inconsistent[term != "(Intercept)"]%>%print(n=50)
+
+```
+
+```{r skip: compare beta values to zero}
+
+#coef for consistent vs. inconsistent trial RT - compare these beta values to zero 
+coefs_beta_learning_base_inconsistent[term == "trialtype2consistent", summaryh(t.test(coefs, mu = 0))]
+
+#coef for consistent vs. neutral trial RT - compare these beta values to zero 
+coefs_beta_learning_base_consistent[term == "trialtype2neutral", summaryh(t.test(coefs, mu = 0))]
+
+#coef for inconsistent vs. neutral trial RT - compare these beta values to zero 
+coefs_beta_learning_base_inconsistent[term == "trialtype2neutral", summaryh(t.test(coefs, mu = 0))]
+
+```
+
+Calculate flanker scores
+```{r Calculate flanker scores}
+#flanker scores based on mean RT
+flanker_indices_rt = df[acc == 1, .(rt = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2)]
+flanker_indices_rt = spread(flanker_indices_rt, trialtype2, rt)
+flanker_indices_rt[, flanker_score := inconsistent - consistent]
+
+#how many flanker indices are above zero?
+flanker_indices_rt[flanker_score > 0, .N/53]
+flanker_indices_rt[flanker_score > 0, .N]
+flanker_indices_rt[, summaryh(t.test(flanker_score, mu=0))]
+```
+
+Calculate sustained attention scores for each participant
+```{r interpolate missing values}
+df[, rt_interp := na_ma(rtResidual, k = 2, weighting = "simple"), by=.(participant, block_num)] #interpolate missing values
+```
+
+```{r calculate moving time course of preceding RTs by block}
+#moving time course
+df[, preceding_rt3 := as.vector(lag(roll::roll_mean(as.matrix(rt_interp), width = 3, min_obs = 1))), by = .(participant, block_num)] #moving average of RTs by participnat and block 
+
+#mean center preceding RT variable within each participant
+df[, preceding_rt3_scaled := scale(preceding_rt3, scale = F), by = participant] 
+```
+
+```{r calculate absolute deviance of moving time course values}
+df[, meanabsdev_preceding_rt3 := abs(preceding_rt3_scaled)]#calculate a variable that reflects the absolute value of preceding RT deviance; this will be used in the "zone" calculation
+```
+
+```{r extract the median of these values within each participant}
+median_value = df[, .(median_value = median(meanabsdev_preceding_rt3, na.rm = T)), by = participant]#calculate the median value of the absolute deivance of preceding RT
+```
+
+```{r calculate the cut off value}
+cutoff = mean(median_value$median_value) # values wiht absolute deviance values that are greater than this number are considered more deviant than average
+```
+
+```{r calculate cut off value}
+df[meanabsdev_preceding_rt3 > cutoff & preceding_rt3_scaled < 0, zone_preceding_rt := "out"] #if a trial is more than the median deviance of preceding RT and is less than zero, it's assigned an "out" label
+df[is.na(zone_preceding_rt), zone_preceding_rt := "in"] #all other trials are assigned "in" variables
+```
+
+```{r sustained attention scores: percent of time in the zone on neutral trials}
+percent_out_preceding_rt_all = df[zone_preceding_rt == "out", .N, by= .(participant)]
+num_trials = df[!is.na(preceding_rt3_scaled), .(numTrial =  .N), by = participant] 
+percent_out_preceding_rt_all = left_join(percent_out_preceding_rt_all, num_trials)
+percent_out_preceding_rt_all[, percent_out_preceding_rt_all := N/numTrial]
+
+#percent out using neutral trials (used in analyses)
+percent_out_preceding_rt_neutral = df[zone_preceding_rt == "out" & trialtype2 == "neutral", .N, by= .(participant)]
+num_trials = df[!is.na(preceding_rt3_scaled) & trialtype2 == "neutral", .(numTrial =  .N), by = participant]
+percent_out_preceding_rt_neutral = left_join(percent_out_preceding_rt_neutral, num_trials)
+percent_out_preceding_rt_neutral[, percent_out_preceding_rt_neutral := N/numTrial]
+hist(percent_out_preceding_rt_neutral$percent_out_preceding_rt_neutral)
+shapiro.test(percent_out_preceding_rt_neutral$percent_out_preceding_rt_neutral)
+```
+
+```{r join flanker scores and sustained attention scores and check normality of flanker bias scores}
+#join scores
+flanker_indices_rt = left_join(flanker_indices_rt, percent_out_preceding_rt_neutral[, c(1,4)])
+flanker_indices_rt = left_join(flanker_indices_rt, percent_out_preceding_rt_all[, c(1,4)])
+
+shapiro.test(flanker_indices_rt$flanker_score)
+shapiro.test(flanker_indices_rt$percent_out_preceding_rt_neutral)
+
+#normality test
+shapiro.test(flanker_indices_rt$flanker_score)
+shapiro.test(flanker_indices_rt[flanker_score > 0]$flanker_score)
+shapiro.test(flanker_indices_rt[flanker_score < 0]$flanker_score)
+shapiro.test(flanker_indices_rt$percent_out_preceding_rt_neutral)
+```
+
+Correlate sustained attention scores with flanker scores
+```{r all scores - sustained attention and flanker score correlation}
+#spearman rcorr
+#cor.test
+cor.test(x=flanker_indices_rt$percent_out_preceding_rt_neutral, 
+         y=flanker_indices_rt$flanker_score, 
+         method = 'spearman')
+#rcor
+rcorr(flanker_indices_rt$percent_out_preceding_rt_neutral, flanker_indices_rt$flanker_score, type = "spearman")
+```
+
+```{r scores above zero - sustained attention and flanker score correlation}
+#cor.test
+cor.test(x=flanker_indices_rt[flanker_score > 0]$percent_out_preceding_rt_neutral, 
+         y=flanker_indices_rt[flanker_score > 0]$flanker_score, 
+         method = 'spearman')
+
+#rcorr
+rcorr(flanker_indices_rt[flanker_score > 0]$percent_out_preceding_rt_neutral, flanker_indices_rt[flanker_score > 0]$flanker_score, type = "spearman")
+
+#cor
+cor(x=flanker_indices_rt[flanker_score > 0]$flanker_score, y = flanker_indices_rt[flanker_score > 0]$percent_out_preceding_rt_neutral, method = 'spearman')
+```
+
+```{r scores below zero - sustained attention and flanker score correlation}
+#cor.test
+cor.test(x=flanker_indices_rt[flanker_score < 0]$percent_out_preceding_rt_neutral, 
+         y=flanker_indices_rt[flanker_score < 0]$flanker_score, 
+         method = 'spearman')
+
+#rcorr
+rcorr(flanker_indices_rt[flanker_score < 0]$percent_out_preceding_rt_neutral, flanker_indices_rt[flanker_score < 0]$flanker_score, type = "spearman")
+
+#cor
+cor(x=flanker_indices_rt[flanker_score < 0]$flanker_score, y = flanker_indices_rt[flanker_score < 0]$percent_out_preceding_rt_neutral, method = 'spearman')
+```
+
+```{r do the correlations differ from each other (test  using linear regression)}
+flanker_indices_rt[flanker_score > 0, learning := "yes"]
+flanker_indices_rt[flanker_score < 0, learning := "no"]
+flanker_indices_rt[, summaryh(lm(flanker_score ~ percent_out_preceding_rt_neutral * learning))]
+```
+
+Do people display learning more when out of the zone (within subject analysis)
+```{r effect code zone variable}
+#effect code variables for interaction model
+df[zone_preceding_rt == "out", zone_preceding_rt_EC := -1]
+df[zone_preceding_rt == "in", zone_preceding_rt_EC := 1]
+```
+
+```{r run model - all participants}
+#singular fit
+within_subj_model_learning <- lmer(rtResidual ~ trialtype * zone_preceding_rt + (trialtype * zone_preceding_rt|participant), data = df[!trialtype2 == "neutral" & acc == 1]); summaryh(within_subj_model_learning)
+
+# reduce model (remove covariance correlations)
+#still get singular fit
+within_subj_model_learning <- lmer(rtResidual ~ trialtype * zone_preceding_rt + (trialtype * zone_preceding_rt||participant), data = df[!trialtype2 == "neutral" & acc == 1]); summaryh(within_subj_model_learning)
+
+# reduced model (remove random slopes from trialtype)
+#no singular fit warning
+within_subj_model_learning <- lmer(rtResidual ~ trialtype * zone_preceding_rt + (zone_preceding_rt||participant), data = df[!trialtype2 == "neutral" & acc == 1], control=lmerControl(optimizer="Nelder_Mead", optCtrl=list(maxfun=1e4))); summaryh(within_subj_model_learning)
+```
+
+```{r restricting analyses to individuals who showed learning}
+learningparticipants <- flanker_indices_rt[learning == "yes", unique(participant)]
+
+#showed learning
+within_subj_model_learning_participants_only <- lmer(rtResidual ~ trialtype * zone_preceding_rt + (zone_preceding_rt||participant), data = df[!trialtype2 == "neutral" & acc == 1 & participant %in% c(learningparticipants)], control=lmerControl(optimizer="Nelder_Mead", optCtrl=list(maxfun=1e4))); summaryh(within_subj_model_learning_participants_only)
+
+
+#did not showed learning
+within_subj_model_no_learning_participants_only <- lmer(rtResidual ~ trialtype * zone_preceding_rt + (zone_preceding_rt||participant), data = df[!trialtype2 == "neutral" & acc == 1 & !participant %in% c(learningparticipants)], control=lmerControl(optimizer="Nelder_Mead", optCtrl=list(maxfun=1e4))); summaryh(within_subj_model_no_learning_participants_only)
+```
+
+Figures in text
+```{r create folder where figures will be saved}
+figure_folder = '/Users/alexandradecker/Dropbox/Projects/frowney/Manuscript/'
+```
+
+```{r Figure 1 - People are faster on consistent trials}
+df_summarized_rt = df[acc == 1, .(rt = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2)]
+df_summarized_rt = tbl_dt(df_summarized_rt)
+summarized_for_plotting = seWithin(df_summarized_rt, measurevar = "rt", withinvars = "trialtype2", idvar = "participant")
+summarized_for_plotting$trialtype2=factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+ggplot(summarized_for_plotting, aes(trialtype2, rt, color = trialtype2)) +
+  geom_point(position = position_dodge(width = 0.5), size =2.5) +
+  geom_errorbar(aes(ymin = rt - se, ymax  = rt + se), width = 0, position = position_dodge(width = 0.5), size =1.5) +
+  labs(x = " ", y = "Response time (ms)")+
+  scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+ggtheme +
+  theme(legend.position = 0)
+
+ggsave("rt_trialtype.eps", width = 5, height = 4.5, path = figure_folder)
+```
+
+```{r Figure 2a - Flanker bias scores violin}
+flanker_indices_rt[, group := "yes"]
+ggplot(flanker_indices_rt, aes(group, flanker_score)) +
+  geom_violin(scale="width", trim=TRUE, color = "black") +
+  geom_quasirandom(color = "purple") +
+  geom_hline(yintercept = 0, color = "black")+
+  ggtheme +
+  labs(y = "Flanker RT index \n(inconsistent-consistent RT; ms)", x = " " )
+
+ggsave(height = 4, width = 4, filename = "violin_flanker_indices.eps")
+
+#median
+flanker_indices_rt[, group := "yes"]
+ggplot(flanker_indices_rt, aes(group, flanker_score)) +
+  geom_violin(scale="width", trim=TRUE, color = "black") +
+  geom_quasirandom(color = "purple") +
+  geom_hline(yintercept = 0, color = "black")+
+  ggtheme +
+  labs(y = "Flanker RT index \n(inconsistent-consistent RT; ms)", x = " " )
+
+ggsave(height = 4, width = 4, filename = "violin_flanker_indices.eps")
+```
+
+```{r Figure 2b - time course smoothed RT for representative subject}
+#get person who has median time out of the zone on neutral trials
+median_percent_out = percent_out_preceding_rt_neutral[, median(percent_out_preceding_rt_neutral)] 
+percent_out_preceding_rt_neutral[percent_out_preceding_rt_neutral == median_percent_out ,]$participant
+
+df$trialtype2 = factor(df$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+rt_to_plot = df[participant %in% c(51) & !is.na(preceding_rt3),  .(total_trial_num, preceding_rt3, rt_interp)]
+
+#look how others did it
+filled_smoothed_values = approx(rt_to_plot$total_trial_num, rt_to_plot$preceding_rt3, n=4000)
+filled_nonsmoothed_values = approx(rt_to_plot$total_trial_num, rt_to_plot$rt_interp, n=4000)
+smoothed_rt_plot = data.table(trial_num = filled_smoothed_values$x, smoothed_rt = filled_smoothed_values$y)
+nonsmoothed_rt_plot = data.table(trial_num = filled_nonsmoothed_values$x, nonsmoothed_rt = filled_nonsmoothed_values$y)
+smoothed_nonsmoothed_to_plot = left_join(nonsmoothed_rt_plot, smoothed_rt_plot)
+smoothed_nonsmoothed_to_plot$zone = NULL
+
+#define the cut off for figure
+df[zone_preceding_rt == "out" & participant == 51, .(max  = max(rtResidual_ms, na.rm = T))]
+df[zone_preceding_rt == "out" & participant == 51, .(max  = max(preceding_rt3, na.rm = T))]
+
+smoothed_nonsmoothed_to_plot[abs(smoothed_rt) & smoothed_rt < 0, zone := "out"]
+smoothed_nonsmoothed_to_plot[is.na(zone), zone := "in"]
+smoothed_nonsmoothed_to_plot$zone = factor(smoothed_nonsmoothed_to_plot$zone, levels = c("in", "out"))
+
+#fewer trials
+ggplot(smoothed_nonsmoothed_to_plot[trial_num >199], aes(trial_num, smoothed_rt, col = zone)) + #chosen because this participant reflecte the mean mediation absolute deviation in adults
+  geom_line(df = smoothed_nonsmoothed_to_plot[trial_num >199], aes(x = trial_num, y = nonsmoothed_rt), inherit.aes = F, color  = "lightgrey") +
+  geom_path(group =1, size = 1) +
+  labs(x = "Trial Number", y = "Preceding RT (mean centered)") +
+ggtheme +
+  scale_color_manual(breaks = c("In", "Out"), values = c("turquoise4", "hotpink"), labels = c("In", "Out")) #+
+  #geom_point(df = df[trialtype2 == "neutral" & participant == 43], aes(total_trial_num, smoothed_rt_interp, col = smoothed_zone_rt))
+ggsave("trial_no_rt.eps", height = 4, width = 6)
+```
+
+```{r Figure 3a - correlation of flanker bias and sustained attention scores}
+ggplot(flanker_indices_rt, aes(percent_out_preceding_rt_neutral *100, flanker_score)) +
+geom_point(color  = "purple") +
+  stat_smooth(method = "lm", formula = y ~ x, color = "black") +
+  ggtheme +
+  labs(x = "Time out of zone (%)", y = "Flanker index") 
+ggsave("corr_flanker_percentout.png", height= 4, width = 4)
+
+
+ggplot(flanker_indices_rt, aes(flanker_score, percent_out_preceding_rt_neutral *100)) +
+geom_point(color  = "purple") +
+  stat_smooth(method = "lm", formula = y ~ x, color = "black") +
+  ggtheme +
+  labs(x = "Flanker index", y = "Time out of zone (%)")
+
+
+ggplot(flanker_indices_rt, aes(flanker_score, percent_out_preceding_rt_neutral *100)) +
+geom_point(color  = "purple") +
+  stat_smooth(method = "lm", formula = y ~ x, color = "black") +
+  ggtheme +
+  labs(x = "Flanker index", y = "Time out of zone (%)")
+```
+  
+```{r Figure 3b}
+summarized_df = df[trialtype2 %in% c("consistent", "inconsistent") & acc == 1, .(rtResidual = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2, zone_preceding_rt)]
+
+summarized_df_plot = seWithin(summarized_df, withinvars = c("trialtype2", "zone_preceding_rt"), measurevar = "rtResidual", idvar = "participant")
+
+ggplot(summarized_df_plot, aes(zone_preceding_rt, rtResidual, col = trialtype2)) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = rtResidual - se, ymax  = rtResidual + se), width = 0, size = 1.5) +
+  ggtheme +
+  labs(x = "Zone", y = "Response time (ms)") + 
+  scale_color_manual(breaks = c("In", "Out"), values = c("turquoise4", "hotpink"), labels = c("inconsistent", "consistent")) 
+ggsave("response_time_zone.eps", height= 4, width = 4)
+```
+
+
+Supplementary Figures
+```{r Suppl Figure 1 - trial accuracy}
+df_summarized_acc = df[, .(acc = mean(acc , na.rm=T)), by = .(participant, trialtype2)]
+summarized_for_plotting= seWithin(df_summarized_acc, measurevar = "acc", withinvars = "trialtype2", idvar = "participant")
+summarized_for_plotting$trialtype2=factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+ggplot(summarized_for_plotting, aes(trialtype2, acc, color = as.factor(trialtype2))) +
+  geom_point(position = position_dodge(width = 0.5), size = 2.5) +
+  geom_errorbar(aes(ymin = acc - se, ymax  = acc + se), width = 0, position = position_dodge(width = 0.5), size = 1.5) +
+  ggtheme +
+  labs(x = " ", col = " ", y = "Accuracy (%)")+
+  scale_y_continuous(breaks = c(0.94, 0.95, 0.96), labels = c("94", "95", "96"))+
+  scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+ggtheme +
+  theme(legend.position = 0)
+
+figure_folder = '/Users/alexandradecker/Dropbox/Research/frowney/Manuscript/Nature Human Behavior/Figures_scratch'
+ggsave("SF1_acc_trialtype.eps", width = 5, height = 4.5, path = figure_folder)
+
+
+#by block
+df_summarized = df[, .(acc = mean(acc, na.rm=T)), by = .(participant, trialtype2, block_num)]
+summarized_for_plotting= seWithin(df_summarized, measurevar = "acc", withinvars = c("trialtype2", "block_num"), idvar = "participant")
+
+ggplot(summarized_for_plotting[!is.na(block_num)], aes(trialtype2, acc, color = as.factor(trialtype2))) +
+  geom_point(position = position_dodge(width = 0.5), size = 2) +
+  geom_errorbar(aes(ymin = acc - se, ymax  = acc + se), width = 0, position = position_dodge(width = 0.5), size = 1) +
+  ggtheme +
+  labs(x = " ", col = " ") +
+  facet_wrap(~block_num)
+
+```
+
+```{r Suppl Figure 2 - Flanker bias correlation above versus below zero}
+flanker_indices_rt[, .N, by = learning]
+
+ggplot(flanker_indices_rt, aes(flanker_score, percent_out_preceding_rt_neutral *100)) +
+geom_point(color  = "purple") +
+  ggtheme +
+  #labs(x = "Flanker index", y = "Time out of zone (%)") +
+  geom_smooth(data = flanker_indices_rt[flanker_score > 0], formula = y ~ x, method = "lm", color = "black") +
+    geom_smooth(data = flanker_indices_rt[flanker_score < 0], formula = y ~ x, method = "lm", color = "black")
+
+ggsave("corr_flanker_percentout_supl.png", height= 4, width = 4)
+```
+
+
