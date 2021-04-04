@@ -1,0 +1,831 @@
+---
+title: "Frowney 2021"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r load packages and data}
+rm(list = ls())
+setwd('/Users/alexandradecker/Dropbox/Projects/frowney')
+#setwd('/Users/Johnny/Dropbox/frowney/')
+source(file = "Scripts & image files/utils.R")
+list.files('./data')
+df <- fread("data/FINAL_DT_DATA_CLEAN.csv")
+
+df <- left_join(df, df[, .(rt_neutral = mean(response_time, na.rm=T)), by = .(participant, trialtype2)][trialtype2 == 'neutral', .(participant, rt_neutral)])
+```
+
+
+```{r plot raw data as a function of trial number}
+participant_mean_rt <- df[response_time < 3, .(rt = mean(response_time, na.rm=T)), by = .(participant, trial_in_block)]
+participants <- df[, unique(participant)]
+
+ggplot(participant_mean_rt[participant %in% c(sample(participants, 4))], aes(trial_in_block, rt)) + 
+  geom_point() + 
+  stat_smooth(formula = y ~x, method = 'lm') + 
+  facet_wrap(~participant)
+
+ggplot(df[participant %in% c(sample(participants, 4)) & block_num %in% c(sample(1:4, 1))], aes(trial_in_block, response_time)) + 
+  geom_point() + 
+  stat_smooth(formula = y ~x, method = 'lm') + 
+  facet_wrap(~participant)
+```
+
+
+```{r demographics}
+demographics <- fread("./data/frowney.demog.csv")
+demographics[, .N, by = .(sex)]
+```
+
+```{r power}
+pwr.r.test(n=53, sig.level = 0.05, power = .80)
+pwr.r.test(n=53, sig.level = 0.05, r =0.3739177)
+es(r = 0.37)
+```
+
+```{r rt as a function of errors}
+summaryh(glmer(acc ~ preceding_rt_interp + (preceding_rt_interp|participant), family = 'binomial', data = df))
+summaryh(glmer(acc ~ preceding_mean_abs_deviance + (preceding_mean_abs_deviance|participant), family = 'binomial', data = df))
+```
+
+
+```{r RT on error trials vs. correct trials}
+# check RT for error trials
+summaryh(lmer(response_time ~ acc + (acc|participant), data = df,control=lmerControl(optimizer="Nelder_Mead", optCtrl=list(maxfun=1e4))))
+summaryh(lmer(response_time ~ acc + (1|participant), data = df[trialtype2 == "inconsistent"],control=lmerControl(optimizer="Nelder_Mead", optCtrl=list(maxfun=1e4)))) #inconsistent trials
+
+mean_rt_acc <- df[, .(mean_rt = mean(response_time, na.rm=T)), by = .(participant, acc)]
+mean_rt_acc_wide <- spread(mean_rt_acc, acc, mean_rt)
+t.test( mean_rt_acc_wide$`1`, mean_rt_acc_wide$`0`, paired = T)
+```
+
+On average, people show evidence of learning
+```{r calculate mean RT by trial type}
+df$trialtype2 <- relevel(as.factor(df$trialtype2), ref = "inconsistent")
+learning_model = lmer(rtResidual ~ trialtype2  + (1|participant), data = df[acc == 1]);summaryh(learning_model)
+```
+
+Learning - accuracy
+```{r accuracy by trial type }
+accuracy_trialtype = df[, .(acc = mean(acc, na.rm=T)), by = .(participant, trialtype2)]
+df$trialtype2 <- relevel(as.factor(df$trialtype2), ref = "consistent")
+learning_acc.m = glmer(acc ~ trialtype2  + (trialtype2|participant), family  = "binomial", data = df);summaryh(learning_acc.m)
+```
+
+Learning over time 
+```{r Learning by block (lmer)}
+df$trialtype2 <- relevel(as.factor(df$trialtype2), ref = "consistent")
+learning_across_thirds <- df[acc == 1, summaryh(lmer(rtResidual ~ trialtype2 * split_third + (1|participant)), control=lmerControl(optimizer="Nelder_Mead", optCtrl=list(maxfun=1e4)))]
+
+#Learning within each portion of the task
+df$trialtype2 <- relevel(as.factor(df$trialtype2), ref = 'inconsistent')
+
+df[acc == 1, summaryh(lmer(rtResidual ~ trialtype2 + (1|participant))), by = split_third][term != "(Intercept)"]
+df[acc == 1 & split_third==-1, summaryh(anova(lmer(rtResidual ~ trialtype2 + (1|participant))))]
+
+
+df[acc == 1, summaryh(lmer(rtResidual ~ trialtype2 + (1|participant))), by = split_third][term != "(Intercept)"]
+df[, .N, by = .(split_third, participant)]
+```
+
+Calculate flanker scores
+```{r Calculate flanker scores}
+#flanker scores based on mean RT
+flanker_indices_rt = df[acc == 1, .(rt = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2)]
+flanker_indices_rt = spread(flanker_indices_rt, trialtype2, rt)
+flanker_indices_rt[, flanker_score := inconsistent - consistent]
+#how many flanker indices are above zero?
+flanker_indices_rt[flanker_score > 0, .N/53]
+flanker_indices_rt[, summaryh(t.test(flanker_score, mu=0))]
+
+#Flanker scores last 2 thirds of the task
+flanker_indices_rt_2thirds = df[acc == 1 & block_num %in% c(2,3,4,5), .(rt = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2)]
+flanker_indices_rt_2thirds = spread(flanker_indices_rt_2thirds, trialtype2, rt)
+flanker_indices_rt_2thirds[, flanker_score_2thirds := inconsistent - consistent]
+
+#how many flanker indices are above zero?
+flanker_indices_rt_2thirds[flanker_score_2thirds > 0, .N/53]
+flanker_indices_rt_2thirds[flanker_score_2thirds > 0, .N]
+flanker_indices_rt_2thirds[, summaryh(t.test(flanker_score_2thirds, mu=0))]
+```
+
+```{r calculate flanker accuracy scores}
+flanker_indices_acc = df[, .(acc = mean(acc, na.rm=T)), by = .(participant, trialtype2)]
+flanker_indices_acc = spread(flanker_indices_acc, trialtype2, acc)
+flanker_indices_acc[, flanker_score_accc := consistent - inconsistent]
+
+#how many flanker indices are above zero?
+flanker_indices_acc[flanker_score_accc > 0, .N/53]
+flanker_indices_acc[, summaryh(t.test(flanker_score_accc, mu=0))]
+
+#accuracy flanker last two thirds
+flanker_indices_acc_2thirds = df[block_num %in% c(2,3,4,5), .(acc = mean(acc, na.rm=T)), by = .(participant, trialtype2)]
+flanker_indices_acc_2thirds = spread(flanker_indices_acc_2thirds, trialtype2, acc)
+flanker_indices_acc_2thirds[, flanker_score_2thirds := inconsistent - consistent]
+
+flanker_indices_acc_2thirds[flanker_score_2thirds > 0, .N/53]
+flanker_indices_acc_2thirds[flanker_score_2thirds > 0, .N]
+flanker_indices_acc_2thirds[, summaryh(t.test(flanker_score_2thirds, mu=0))]
+```
+
+Between subjects: Correlate sustained attention scores with flanker scores
+```{r calculate percent time out of the zone}
+colsToMean <- c("zone_smoothed_deviance", "zone_preceding_rt", "zone_preceding_abs_dev", "zone_neutral")
+percent_out <- df[, lapply(.SD, mean, 0, T), by = participant, .SDcols = colsToMean]
+setnames(percent_out, old = colsToMean, new = paste0(colsToMean, "_pOut"))
+```
+
+```{r join flanker scores and sustained attention scores and check normality of flanker bias scores}
+#join scores
+flanker_indices_rt = left_join(flanker_indices_rt, percent_out)
+flanker_indices_rt = left_join(flanker_indices_rt, flanker_indices_rt_2thirds[, c(1,5)])
+mean_rts <- df[, .(mean_rt = mean(response_time, na.rm=T)),by = .(participant)]
+median_rts <- df[acc == 1, .(median_rt = median(response_time, na.rm=T)), by = .(participant)]
+
+mean_rts_neutral <- df[trialtype2 == 'neutral', .(mean_rt_neutral = mean(response_time, na.rm=T)),by = .(participant)]
+flanker_indices_rt[, mean_minus_median := .(mean_rt -median_rt), by = participant]
+
+flanker_indices_rt$mean_rt_neutral <- NULL
+flanker_indices_rt <- left_join(flanker_indices_rt, mean_rts)
+flanker_indices_rt <- left_join(flanker_indices_rt, mean_rts_neutral)
+flanker_indices_rt <- left_join(flanker_indices_rt, median_rts)
+flanker_indices_rt <- left_join(flanker_indices_rt, median_rts_neutral)
+
+#normality test
+shapiro.test(flanker_indices_rt$flanker_score)
+shapiro.test(flanker_indices_rt$flanker_score_2thirds)
+shapiro.test(flanker_indices_rt[flanker_score > 0]$flanker_score)
+shapiro.test(flanker_indices_rt[flanker_score < 0]$flanker_score)
+
+df[trial_in_block != 0, summaryh(glmer(zone_preceding_rt ~ total_trial_numC_scaled + (total_trial_numC_scaled|participant), family = 'binomial'))]
+
+df$response_time
+ggplot(df, aes(trial_in_block, response_time)) +
+  stat_summary()
+ggplot(df[!trial_in_block %in% c(0) & response_time < 2.5], aes(trial_in_block, response_time)) +
+  stat_summary()
+```
+
+```{r sustained attention and flanker score correlation}
+cor.test(x=flanker_indices_rt$zone_preceding_rt_pOut, 
+         y=flanker_indices_rt$flanker_score, 
+         method = 'spearman')
+
+pcor.test(x = flanker_indices_rt$flanker_score, 
+                 y = flanker_indices_rt$zone_preceding_rt_pOut, 
+                 z = flanker_indices_rt$median_rt,
+                 method = 'spearman')
+
+summaryh(lm(flanker_score ~ zone_preceding_rt_pOut + median_rt, data = flanker_indices_rt))
+
+
+pcor.test(x = flanker_indices_rt[flanker_score > 0]$flanker_score, 
+                 y = flanker_indices_rt[flanker_score > 0]$zone_preceding_rt_pOut, 
+                 z = flanker_indices_rt[flanker_score > 0]$median_rt,
+                 method = 'spearman')
+
+
+
+pcor.test(x = flanker_indices_rt[flanker_score > 0]$flanker_score, 
+                 y = flanker_indices_rt[flanker_score > 0]$zone_preceding_rt_pOut, 
+                 z = flanker_indices_rt[flanker_score > 0]$mean_rt,
+                 method = 'spearman')
+
+
+cor.test(x = flanker_indices_rt$flanker_score, 
+                 y = flanker_indices_rt$mean_rt_neutral,
+                 method = 'spearman')
+
+
+cor.test(x = flanker_indices_rt$flanker_score, 
+                 y = flanker_indices_rt$zone_preceding_rt_pOut,
+                 method = 'spearman')
+
+
+summaryh(lm(flanker_score ~ zone_preceding_rt_pOut + mean_rt_neutral, data = flanker_indices_rt))
+
+pcor.test(x = flanker_indices_rt$flanker_score, 
+                 y = flanker_indices_rt$mean_rt_neutral, 
+                 z = flanker_indices_rt$zone_preceding_rt_pOut,
+                 method = 'spearman')
+
+summaryh(lm(flanker_score ~ zone_preceding_rt_pOut + median_rt, data = flanker_indices_rt))
+
+#last two thirds of task flanker scores and zone correlation
+cor.test(x=flanker_indices_rt[flanker_score_2thirds > 0]$zone_preceding_rt_pOut, 
+         y=flanker_indices_rt[flanker_score_2thirds > 0]$flanker_score_2thirds, 
+         method = 'spearman')
+
+
+#esterman method
+cor.test(x=flanker_indices_rt$zone_smoothed_deviance_pOut, 
+         y=flanker_indices_rt$flanker_score, 
+         method = 'spearman')
+
+cor.test(x=flanker_indices_rt[flanker_score_2thirds > 0]$zone_smoothed_deviance_pOut, 
+         y=flanker_indices_rt[flanker_score_2thirds > 0]$flanker_score, 
+         method = 'spearman')
+
+#last two thirds
+cor.test(x=flanker_indices_rt$zone_smoothed_deviance_pOut, 
+         y=flanker_indices_rt$flanker_score_2thirds, 
+         method = 'spearman')
+
+cor.test(x=flanker_indices_rt[flanker_score_2thirds > 0]$zone_smoothed_deviance_pOut, 
+         y=flanker_indices_rt[flanker_score_2thirds > 0]$flanker_score_2thirds, 
+         method = 'spearman')
+
+
+# neutral trials method
+cor.test(x=flanker_indices_rt$zone_neutral_pOut, 
+         y=flanker_indices_rt$flanker_score, 
+         method = 'spearman')
+
+cor.test(x=flanker_indices_rt[flanker_score_2thirds > 0]$zone_neutral_pOut, 
+         y=flanker_indices_rt[flanker_score_2thirds > 0]$flanker_score, 
+         method = 'spearman')
+
+#last two thirds
+cor.test(x=flanker_indices_rt$zone_neutral_pOut, 
+         y=flanker_indices_rt$flanker_score_2thirds, 
+         method = 'spearman')
+
+cor.test(x=flanker_indices_rt[flanker_score_2thirds > 0]$zone_neutral_pOut, 
+         y=flanker_indices_rt[flanker_score_2thirds > 0]$flanker_score_2thirds, 
+         method = 'spearman')
+```
+
+Does sustained attention in the first third predict learning in the second third and vice versa?
+```{r prepare data}
+#flanker scores in each third
+flanker_scores_split_third <- df[acc == 1, .(rt = mean(rtResidual, na.rm=T)), by = .(participant, trialtype2, split_third)]%>%
+  spread(key = trialtype2, value = rt)
+flanker_scores_split_third[, flanker_scores := inconsistent - consistent]
+flanker_scores_split_third[, summaryh(t.test(flanker_scores, mu = 0)), by = split_third]
+
+#flanker scores in last two thirds
+flanker_scores_two_thirds <- df[split_third %in% c(0, 1) & acc == 1, .(rt = mean(rtResidual, na.rm=T)), by = .(participant, trialtype2)]%>%
+  spread(key = trialtype2, value = rt)
+flanker_scores_two_thirds[, flanker_scores_middle_last := inconsistent - consistent]
+
+#time out in each third and in the last two thirds
+time_out_split_third <- df[, .(time_out = mean(zone_preceding_rt, na.rm=T)), by = .(participant, split_third)]
+time_out_two_thirds <- df[split_third %in% c(0, 1), .(time_out_middle_last = mean(zone_preceding_rt, na.rm=T)), by = .(participant)]
+
+median_rt <- df[acc == 1, .(median_rt = median(response_time, na.rm=T)), by = .(participant)]
+
+
+attention_pred_learning <- left_join(time_out_split_third[split_third == -1, .(participant, time_out_first = time_out) ], flanker_scores_split_third[split_third == 1, .(participant, flanker_scores_last = flanker_scores)])
+attention_pred_learning <- left_join(attention_pred_learning, flanker_scores_split_third[split_third == -1, .(participant, flanker_scores_first = flanker_scores)])
+attention_pred_learning <- left_join(attention_pred_learning, flanker_scores_split_third[split_third == 0, .(participant, flanker_scores_second = flanker_scores)])
+attention_pred_learning <- left_join(attention_pred_learning, time_out_split_third[split_third == 1, .(participant, time_out_last = time_out)])
+attention_pred_learning <- left_join(attention_pred_learning, flanker_scores_two_thirds[, .(participant, flanker_scores_middle_last)])
+attention_pred_learning <- left_join(attention_pred_learning, time_out_two_thirds)
+attention_pred_learning <- left_join(attention_pred_learning, median_rt)
+```
+
+```{r granger causality like analysis}
+# correlational analysis
+cor.test(x = attention_pred_learning$flanker_scores_middle_last, 
+          y= attention_pred_learning$time_out_first, 
+          method = 'spearman')
+
+
+cor.test(x = attention_pred_learning[flanker_scores_middle_last > 0]$flanker_scores_middle_last, 
+          y= attention_pred_learning[flanker_scores_middle_last > 0]$time_out_first, 
+          method = 'spearman')
+
+
+#after adjusting for concurrent attentional lapses 
+pcor.test(x = attention_pred_learning$flanker_scores_middle_last, 
+          y= attention_pred_learning$time_out_first, 
+         z = attention_pred_learning$flanker_scores_first,
+          method = 'spearman')
+
+pcor.test(x = attention_pred_learning$flanker_scores_middle_last, 
+          y= attention_pred_learning$time_out_first, 
+         z = attention_pred_learning$time_out_middle_last,
+          method = 'spearman')
+
+
+pcor.test(x = attention_pred_learning$time_out_first, 
+          y= attention_pred_learning$flanker_scores_middle_last, 
+         z = attention_pred_learning$time_out_middle_last,
+          method = 'spearman')
+
+attention_pred_learning[, late_flanker_resid_out_late_lapse :=  residuals(lm(flanker_scores_middle_last ~ time_out_middle_last))]
+
+attention_pred_learning[, late_flanker_resid_out_early_learning :=  residuals(lm(flanker_scores_middle_last ~ flanker_scores_first))]
+
+
+ggplot(attention_pred_learning, aes(time_out_first, late_flanker_resid_out_late_lapse)) +
+  geom_point(color = 'hotpink', size= 2) +
+  stat_smooth(formula = y~ x, method = 'lm', color = 'black') + 
+  ggtheme + 
+  labs(x = '% trials out of the zone (early)', y = 'flanker score residuals (late)')
+#ggsave("flanker_scores_late_lapse_resid.png", height = 4.5, width = 4.5)
+
+
+ggplot(attention_pred_learning, aes(time_out_first, late_flanker_resid_out_early_learning)) +
+  geom_point(color = 'hotpink', size= 2) +
+  stat_smooth(formula = y~ x, method = 'lm', color = 'black') + 
+  ggtheme + 
+  labs(x = '% trials out of the zone (early)', y = 'flanker score residuals (late)')
+#ggsave("flanker_scores_late_lapse_resid.png", height = 4.5, width = 4.5)
+
+
+ggplot(attention_pred_learning, aes(time_out_first, flanker_scores_middle_last)) +
+  geom_point(color = 'hotpink', size= 2) +
+  stat_smooth(formula = y~ x, method = 'lm', color = 'black') + 
+  ggtheme + 
+  labs(x = '% trials out of the zone (early)', y = 'flanker score residuals (late)')
+#ggsave("flanker_scores_late_lapse_early.png", height = 4.5, width = 4.5)
+
+
+pcor.test(x = attention_pred_learning[flanker_scores_middle_last > 0]$flanker_scores_middle_last, 
+          y= attention_pred_learning[flanker_scores_middle_last > 0]$time_out_first, 
+         z = attention_pred_learning[flanker_scores_middle_last > 0]$flanker_scores_first,
+          method = 'spearman')
+
+
+pcor.test(x = attention_pred_learning$flanker_scores_middle_last, 
+          y= attention_pred_learning$time_out_first, 
+         z = attention_pred_learning$time_out_middle_last,
+          method = 'spearman')
+
+
+pcor.test(x = attention_pred_learning$flanker_scores_middle_last, 
+          y= attention_pred_learning$time_out_first, 
+         z = attention_pred_learning$median_rt,
+          method = 'spearman')
+```
+
+Within subjects: Do people display learning more when out of the zone 
+```{r effect code zone variable}
+#effect code variables for interaction model
+df[zone_preceding_rt == 1, zone_preceding_rt_EC := 1]
+df[zone_preceding_rt == 0, zone_preceding_rt_EC := -1]
+```
+
+```{r singular fit models}
+#singular fit
+within_subj_model_learning <- lmer(rtResidual ~ trialtype2 * zone_preceding_rt + (trialtype2 * zone_preceding_rt|participant), data = df[acc == 1 & !is.na(zone_preceding_rt)]); summaryh(within_subj_model_learning)
+
+#still get singular fit
+within_subj_model_learning <- lmer(rtResidual ~ trialtype2 * zone_preceding_rt + (trialtype2 * zone_preceding_rt||participant), data = df[acc == 1 & !is.na(zone_preceding_rt)]); summaryh(within_subj_model_learning)
+
+#preceding RT speed zone correlates with differences in RT on consistent and inconsistent rials wtihin subjects
+within_subj_model_learning_primary <- lmer(rtResidual ~ trialtype2 * zone_preceding_rt + (zone_preceding_rt||participant), data = df[acc == 1 & !is.na(zone_preceding_rt)], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_primary)
+
+within_subj_model_learning_primary <- lmer(rtResidual ~ trialtype * zone_preceding_rt + total_trial_numC  + (trialtype||participant), data = df[acc == 1 & !is.na(zone_preceding_rt) & trialtype2 %in% c('consistent', 'inconsistent')], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_primary)
+
+
+within_subj_model_learning_primary <- lmer(rtResidual ~ trialtype2 * zone_preceding_rt + (zone_preceding_rt|participant), data = df[acc == 1 & block_num %in% c(2, 3, 4, 5)], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_primary)
+
+within_subj_model_learning_esterman <- lmer(rtResidual ~ trialtype2 * zone_smoothed_deviance + (1|participant), data = df[acc == 1 & block_num %in% c(2, 3, 4, 5)], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_esterman)
+
+within_subj_model_learning_preceding_dev <- lmer(rtResidual ~ trialtype2 * zone_preceding_abs_dev + (1|participant), data = df[acc == 1 & block_num %in% c(2, 3, 4, 5)], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_preceding_dev)
+
+
+#####control for trial number
+#no singular fit warning
+within_subj_model_learning_trial_number <- lmer(rtResidual ~ trialtype2 * zone_preceding_rt + total_trial_numC + (zone_preceding_rt|participant), data = df[acc == 1], control=lmerControl(optimizer="Nelder_Mead", optCtrl=list(maxfun=1e4))); summaryh(within_subj_model_learning_trial_number)
+
+
+#### Learners only ####
+learners<- flanker_indices_rt_2thirds[flanker_score_2thirds > 0, unique(participant)]
+#preceding RT speed zone correlates with differences in RT on consistent and inconsistent rials wtihin subjects
+within_subj_model_learning_primary_lo <- lmer(rtResidual ~ trialtype2 * zone_preceding_rt + (zone_preceding_rt|participant), data = df[acc == 1 & participant %in% c(learners)], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_primary_lo)
+
+within_subj_model_learning_esterman_lo <- lmer(rtResidual ~ trialtype2 * zone_smoothed_deviance + (1|participant), data = df[acc == 1 & participant %in% c(learners)], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_esterman_lo)
+
+within_subj_model_learning_preceding_dev_lo <- lmer(rtResidual ~ trialtype2 * zone_preceding_abs_dev + (1|participant), data = df[acc == 1 & participant %in% c(learners)], control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')));summaryh(within_subj_model_learning_preceding_dev_lo)
+```
+
+# Figures
+Figures in text
+```{r Figure 1 - People are faster on consistent trials}
+df_summarized_rt = df[acc == 1, .(rt = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2)]
+df_summarized_rt = tbl_dt(df_summarized_rt)
+summarized_for_plotting = seWithin(df_summarized_rt, measurevar = "rt", withinvars = "trialtype2", idvar = "participant")
+summarized_for_plotting$trialtype2=factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+ggplot(summarized_for_plotting, aes(trialtype2, rt, color = trialtype2)) +
+  geom_point(position = position_dodge(width = 0.5), size =2.5) +
+  geom_errorbar(aes(ymin = rt - se, ymax  = rt + se), width = 0, position = position_dodge(width = 0.5), size =1.5) +
+  labs(x = " ", y = "Response time (ms)")+
+  scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+ggtheme +
+  theme(legend.position = 0)
+
+#ggsave("rt_trialtype.eps", width = 5, height = 4.5, path = figure_folder)
+```
+
+```{r Figure 1b - Learning overtime}
+df_summarized_rt_block = df[acc == 1, .(rt = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2, block_num)]
+df_summarized_rt_block = setDT(df_summarized_rt_block)
+summarized_for_plotting = seWithin(df_summarized_rt_block, measurevar = "rt", withinvars = c("trialtype2","block_num"), idvar = "participant")
+summarized_for_plotting$trialtype2=factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+ggplot(summarized_for_plotting, aes(trialtype2, rt, color = trialtype2)) +
+  geom_point(position = position_dodge(width = 0.5), size =2.5) +
+  geom_errorbar(aes(ymin = rt - se, ymax  = rt + se), width = 0, position = position_dodge(width = 0.5), size =1.5) +
+  labs(x = " ", y = "Response time (ms)")+
+  scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+ggtheme +
+  theme(legend.position = 0) +
+  facet_wrap(~ block_num)
+
+#ggsave("rt_trialtype_by_block.eps", width = 12, height = 4.5, path = figure_folder)
+```
+
+```{r Figure 2a - Flanker bias scores violin}
+ggplot(flanker_indices_rt, aes(" ", flanker_score)) +
+  geom_violin(scale="width", trim=T, color = "purple", size = 1) +
+  geom_quasirandom(color = "purple", alpha = 0.5, size = 3) +
+  #geom_point()+
+  ggtheme +
+  stat_summary()+
+#geom_dotplot(data = flanker_indices_rt, aes(" ", flanker_score), binaxis='y', stackdir='center', dotsize=1, fill = 'purple', alpha = 0.3)+
+  labs(y = "Flanker RT index \n(inconsistent-consistent RT; ms)", x = " " )
+#ggsave(height = 5, width = 5, filename = "violin_flanker_indices.png", path = figure_folder)
+?geom_dotplot
+
+flanker_indices_rt_2thirds[, group := "yes"]
+ggplot(flanker_indices_rt_2thirds, aes(group, flanker_score)) +
+  geom_violin(scale="width", trim=TRUE, color = "black") +
+  geom_quasirandom(color = "purple") +
+  geom_hline(yintercept = 0, color = "black")+
+  ggtheme +
+  labs(y = "Flanker RT index \n(inconsistent-consistent RT; ms)", x = " " )
+
+#ggsave(height = 4, width = 4, filename = "violin_flanker_indices.eps", path = figure_folder)
+```
+
+```{r Figure 2b; violin for trials out of the zone}
+ggplot(flanker_indices_rt, aes(" ", zone_preceding_rt_pOut)) +
+  geom_violin(scale="width", trim=T, color = "purple", size = 1) +
+  geom_quasirandom(color = "purple", alpha = 0.5, size = 3) +
+  #geom_point()+
+  ggtheme +
+  stat_summary()+
+#geom_dotplot(data = flanker_indices_rt, aes(" ", flanker_score), binaxis='y', stackdir='center', dotsize=1, fill = 'purple', alpha = 0.3)+
+  labs(y = "% trials out of the zone", x = " " )
+#ggsave(height = 5, width = 5, filename = "violin_trialsOut.png", path = figure_folder)
+?geom_dotplot
+```
+
+```{r Figure 2a - time course smoothed RT for representative subject}
+#get person who has median time out of the zone on neutral trials
+median_percent_out = percent_out[, median(zone_preceding_rt_pOut)] 
+percent_out[zone_preceding_rt_pOut == median_percent_out ,]$participant
+
+df$trialtype2 = factor(df$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+df[, rt_interpC := scale(rt_interp, scale = F), by = participant]
+rt_to_plot = df[participant %in% c(9) & !is.na(preceding_rt_interp),  .(total_trial_num, rt_interp, preceding_rt_interp)]
+
+
+#look how others did it
+filled_smoothed_values = approx(rt_to_plot$total_trial_num, rt_to_plot$preceding_rt_interp, n=4000)
+filled_nonsmoothed_values = approx(rt_to_plot$total_trial_num, rt_to_plot$rt_interp, n=4000)
+
+smoothed_rt_plot = data.table(trial_num = filled_smoothed_values$x, smoothed_rt = filled_smoothed_values$y)
+nonsmoothed_rt_plot = data.table(trial_num = filled_nonsmoothed_values$x, nonsmoothed_rt = filled_nonsmoothed_values$y)
+smoothed_nonsmoothed_to_plot = left_join(nonsmoothed_rt_plot, smoothed_rt_plot)
+smoothed_nonsmoothed_to_plot$zone = NULL
+
+#define the cut off for figure
+df[zone_preceding_rt == 1 & participant == 9, .(max  = max(preceding_rt_interp, na.rm = T))]
+
+smoothed_nonsmoothed_to_plot[smoothed_rt < 0.5355339, zone := "out"]
+smoothed_nonsmoothed_to_plot[is.na(zone), zone := "in"]
+smoothed_nonsmoothed_to_plot$zone = factor(smoothed_nonsmoothed_to_plot$zone, levels = c("in", "out"))
+smoothed_nonsmoothed_to_plot[, real_trial_num := floor(trial_num)]
+smoothed_nonsmoothed_to_plot <- left_join(smoothed_nonsmoothed_to_plot, df[participant == 9, .(real_trial_num = total_trial_num, acc)])
+
+#fewer trials
+ggplot(smoothed_nonsmoothed_to_plot[trial_num >100 & trial_num <200], aes(trial_num, smoothed_rt, col = zone)) + #chosen because this participant reflecte the mean mediation absolute deviation in adults
+  geom_line(data = smoothed_nonsmoothed_to_plot[trial_num >100 & trial_num <200], aes(x = trial_num, y = nonsmoothed_rt), inherit.aes = F, color  = "lightgrey") +
+  geom_path(group =1, size = 1) +
+  labs(x = "Trial Number", y = "Preceding RT") +
+ggtheme +
+  scale_color_manual(breaks = c("In", "Out"), values = c("mediumblue", "sienna1"), labels = c("In", "Out"))
+#ggsave("trial_no_rt.eps", height = 4, width = 8, path = figure_folder)
+
+ggplot(smoothed_nonsmoothed_to_plot[trial_num >100 & trial_num <200], aes(x = real_trial_num, y = as.factor(acc), col = as.factor(acc)))+
+  ggtheme +
+  geom_point(shape = 15) +
+theme(legend.position = 0) +
+  scale_y_discrete(labels = c("1.0", "0.0")) +
+    scale_color_manual(breaks = c(1, 0), values = c("indianred", "lightblue"))
+
+#ggsave("acc_trialNo.eps", height = 1, width = 8, path = figure_folder)
+df[, max(total_trial_num)]
+```
+
+```{r Figure 3a - correlation of flanker bias and sustained attention scores}
+ggplot(flanker_indices_rt, aes(percent_out *100, flanker_score)) +
+geom_point(color  = "purple") +
+  stat_smooth(method = "lm", formula = y ~ x, color = "black") +
+  ggtheme +
+  labs(x = "Time out of zone (%)", y = "Flanker index") 
+#ggsave("corr_flanker_percentout.png", height= 4, width = 4, path = figure_folder)
+
+
+ggplot(flanker_indices_rt, aes(flanker_score, percent_out_preceding_rt_neutral *100)) +
+geom_point(color  = "purple") +
+  stat_smooth(method = "lm", formula = y ~ x, color = "black") +
+  ggtheme +
+  labs(x = "Flanker index", y = "Time out of zone (%)")
+
+
+ggplot(flanker_indices_rt, aes(flanker_score, percent_out_preceding_rt_neutral *100)) +
+geom_point(color  = "purple") +
+  stat_smooth(method = "lm", formula = y ~ x, color = "black") +
+  ggtheme +
+  labs(x = "Flanker index", y = "Time out of zone (%)")
+```
+  
+```{r Figure 3b}
+#summarized data
+summarized_df = df[trialtype2 %in% c("consistent", "inconsistent") & acc == 1 & !is.na(zone_preceding_rt), .(rtResidual = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2, zone_preceding_rt)]
+summarized_df_plot = seWithin(summarized_df, withinvars = c("trialtype2", "zone_preceding_rt"), measurevar = "rtResidual", idvar = "participant")
+ggplot(summarized_df_plot, aes(zone_preceding_rt, rtResidual, col = trialtype2)) +
+  geom_point(size = 2.5, position = position_dodge(1)) +
+  geom_errorbar(aes(ymin = rtResidual - se, ymax  = rtResidual + se), width = 0, size = 1.5, position = position_dodge(1)) +
+  ggtheme +
+  labs(x = "Zone", y = "Response time (ms)") + 
+  scale_color_manual(breaks = c("In", "Out"), values = c("turquoise4", "hotpink"), labels = c("inconsistent", "consistent")) 
+#ggsave("response_time_zone.eps", height= 4, width = 6, path = figure_folder)
+
+# raw
+ggplot(summarized_df, aes(as.factor(zone_preceding_rt), rtResidual, col = trialtype2)) +
+  ggtheme +
+  labs(x = "Zone", y = "Response time (ms)") + 
+  geom_violin(size = 1, position = position_dodge(1)) +
+  geom_beeswarm(dodge.width = 1) +
+  scale_color_manual(values = c("turquoise4", "hotpink"), labels = c("inconsistent", "consistent")) +
+  scale_x_discrete(labels = c("in", "out"))
+   
+#ggsave("response_time_zone.eps", height= 4, width = 8, path = figure_folder)
+```
+
+
+```{r}
+df[, rtResidual_scaled_by_zone := scale(rtResidual, scale = F), by = .(participant, zone_preceding_rt)]
+summarized_df = df[trialtype2 %in% c("consistent", "inconsistent") & acc == 1 & !is.na(zone_preceding_rt), .(rtResidual = mean(rtResidual_scaled_by_zone, na.rm=T)), by = .(participant, trialtype2, zone_preceding_rt)]
+summarized_df_plot = seWithin(summarized_df, withinvars = c("trialtype2", "zone_preceding_rt"), measurevar = "rtResidual", idvar = "participant")
+
+ggplot(summarized_df_plot, aes(as.factor(zone_preceding_rt), rtResidual, col = trialtype2)) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = rtResidual - se, ymax  = rtResidual + se), width = 0, size = 1.5) +
+  ggtheme +
+  labs(x = "Zone", y = "Response time (ms)") + 
+  scale_color_manual(values = c("turquoise4", "red"), labels = c("consistent", "inconsistent")) +
+   scale_x_discrete(labels = c("in", "out"))
+
+#ggsave("response_time_zone.eps", height= 4, width = 6, path = figure_folder)
+
+df[!trialtype2 %in% c('neutral') , summaryh(lmer(rtResidual~ trialtype2 + (1|participant))), by = zone_preceding_rt]
+```
+
+
+Supplementary Figures
+```{r Supplementary Figure 1 - raw RT by trial type}
+df_summarized_rt = df[acc == 1, .(rt = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2)]
+df_summarized_rt = setDT(df_summarized_rt)
+df_summarized_rt$trialtype2 <- factor(df_summarized_rt$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+summarized_for_plotting = seWithin(df_summarized_rt, measurevar = "rt", withinvars = "trialtype2", idvar = "participant")
+summarized_for_plotting$trialtype2=factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+ggplot(df_summarized_rt, aes(trialtype2, rt, color = trialtype2)) +
+geom_violin(trim= T) +
+scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+  geom_quasirandom(alpha = 0.5, width = .3) +
+geom_point(data = summarized_for_plotting, aes(trialtype2, rt), size = 1.5, color = "grey5") +
+geom_errorbar(data = summarized_for_plotting, aes(ymin = rt - ci, ymax  = rt + ci), width = 0, position = position_dodge(width = 0.5), size = 1, color= 'black') + 
+ggtheme +
+labs(x = "Trial type", y = "Response time (ms)") +
+theme(legend.position = 0)
+
+#ggsave("rt_trialtype_raw_data.png", width = 7.5, height = 4.5, path = figure_folder)
+```
+
+```{r supplementary Figure 2 - accuracy}
+df_summarized_acc = df[, .(acc = mean(acc , na.rm=T)), by = .(participant)]
+ggplot(df_summarized_acc, aes(" ", acc * 100)) +
+geom_violin(trim= T, color = 'purple', size = 1) +
+geom_quasirandom(color = 'purple', alpha = 0.5)+
+stat_summary() +
+ggtheme +
+labs(x = " ", y = "Accuracy (%)")
+
+#ggsave("overall_accuracy.png", width = 5, height = 4.5, path = figure_folder)
+```
+
+```{r Suppl Figure 3a - accuracy by trial type}
+# summarytized plot
+df_summarized_acc = df[, .(acc = mean(acc , na.rm=T)), by = .(participant, trialtype2)]
+summarized_for_plotting= seWithin(df_summarized_acc, measurevar = "acc", withinvars = "trialtype2", idvar = "participant")
+summarized_for_plotting$trialtype2=factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+ggplot(summarized_for_plotting, aes(trialtype2, acc, color = as.factor(trialtype2))) +
+  geom_point(position = position_dodge(width = 0.5), size = 2.5) +
+  geom_errorbar(aes(ymin = acc - se, ymax  = acc + se), width = 0, position = position_dodge(width = 0.5), size = 1.5)+ ggtheme +
+  labs(x = " ", col = " ", y = "Accuracy (%)")+
+  scale_y_continuous(breaks = c(0.94, 0.95, 0.96), labels = c("94", "95", "96"))+
+  scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+ggtheme +
+  theme(legend.position = 0)
+
+#ggsave("SF1_acc_trialtype.png", width = 5, height = 4.5, path = figure_folder)
+```
+
+```{r Supplementary Figure 3b - accuracy by trial type raw data}
+df_summarized_acc = df[, .(acc = mean(acc , na.rm=T)), by = .(participant, trialtype2)]
+summarized_for_plotting= seWithin(df_summarized_acc, measurevar = "acc", withinvars = "trialtype2", idvar = "participant")
+summarized_for_plotting$trialtype2=factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+df_summarized_acc$trialtype2 <- factor(df_summarized_acc$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+summarized_for_plotting$trialtype2 <- factor(summarized_for_plotting$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+ggplot(df_summarized_acc, aes(trialtype2, acc * 100, color = trialtype2)) +
+geom_violin(trim= T) +
+scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+geom_quasirandom(data = df_summarized_acc, aes(trialtype2, acc * 100, fill = trialtype2), alpha = 0.3, width = 0.2) +
+scale_fill_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+geom_point(data = summarized_for_plotting, aes(trialtype2, acc * 100), size = 1.5, color = "black") +
+geom_errorbar(data = summarized_for_plotting, aes(ymin = acc *100- ci * 100, ymax  = acc * 100+ ci*100), width = 0, position = position_dodge(width = 0.5), size = 1, color = 'black') + 
+ggtheme +
+labs(x = "Trial type", y = "Accuracy (%)") +
+theme(legend.position = 0)
+
+#ggsave("SF1_acc_trialtype_participant_means.png", width = 9, height = 4.5, path = figure_folder)
+```
+
+```{r Supplementary Figure 4a - learning across thirds of the task (summary data and participant data)}
+learning_across_thirds.p <- df[acc == 1, .(rt_mean = mean(rtResidualC_ms, na.rm=T)), by = .(participant, split_third_cat, trialtype2)]
+learning_across_thirds.p[rt_mean > 200]
+
+learning_across_thirds.p <- df[acc == 1, .(rt_mean = mean(rtResidualC_ms, na.rm=T)), by = .(participant, trialtype2)]
+learning_across_thirds.p[, outlers := outliersZ(rt_mean), by =.(trialtype2)]
+learning_across_thirds.p%>%print(n=Inf)
+
+learning_across_thirds.p_summary <- seWithin(measurevar = "rt_mean", withinvars = c("trialtype2", "split_third_cat"), idvar = "participant", data = learning_across_thirds.p)
+
+learning_across_thirds.p_summary$split_third_cat <- factor(learning_across_thirds.p_summary$split_third_cat, levels = c("first", "middle", "last"))
+
+learning_across_thirds.p_summary$trialtype2 <- factor(learning_across_thirds.p_summary$trialtype2, levels = c("consistent", "neutral", "inconsistent"))
+
+
+learning_across_thirds.p$split_third_cat <- factor(learning_across_thirds.p$split_third_cat, levels = c("first", "middle", "last"))
+
+#summary figure
+ggplot(learning_across_thirds.p_summary, aes(split_third_cat, rt_mean, col = trialtype2)) + 
+  #geom_point(size = 3, position = position_dodge(width = 0.98)) + 
+  #geom_errorbar(aes(ymin = rt_mean - se, ymax  = rt_mean + se), width = 0, position = position_dodge(width = 0.98), size = 1) +
+  ggtheme +
+  labs(y = "Response time \n(ms; mean centered)", x = " ", col = "Trial type") + 
+  scale_x_discrete(labels = c("first third", "second third", "last third")) +
+  scale_color_manual(values = c("lightseagreen", "sienna1", "violetred3")) +
+  theme(legend.position = 0) +
+  geom_quasirandom(data = learning_across_thirdsC.p[], 
+                   aes(split_third_cat, rt_mean, col = trialtype2),  dodge.width = .98, size = 1.3)
+
+#ggsave("rt_by_task_thirds.eps", width = 8, height = 4.5, path = figure_folder)
+```
+
+
+```{r learning - individual data points}
+# individual data points
+df[, rtResidualC := scale(rtResidual, scale = F), by = .(participant)]
+df[, rtResidualC_ms := scale(rtResidual_ms, scale = F), by = .(participant)]
+df[, .(rtResidual, mean = mean(rtResidual, na.rm=T), rtResidualC), by = participant]
+df[, .(rtResidual_ms, mean = mean(rtResidual_ms, na.rm=T), rtResidualC_ms), by = participant]
+
+learning_across_thirdsC.p <- df[acc == 1, .(rt_mean = mean(rtResidualC_ms, na.rm=T)), by = .(participant, split_third_cat, trialtype2)]
+learning_across_thirdsC.p$split_third_cat <- factor(learning_across_thirdsC.p$split_third_cat, levels = c("first", "middle", "last"))
+
+ggplot(learning_across_thirdsC.p[trialtype2 != "neutral"], aes(split_third_cat, rt_mean, col = trialtype2)) + 
+  ggtheme +
+  #geom_violin() +
+  geom_quasirandom(aes(split_third_cat, rt_mean, col = trialtype2),  dodge.width = .98, size = 1.3)+
+  labs(y = "Response time \n(ms; mean centered)", x = " ", col = "Trial type") +
+  scale_color_manual(values = c("lightseagreen", "violetred3")) +
+  scale_x_discrete(labels = c("first third", "second third", "last third")) +
+  #stat_summary(color= 'black')
+  #geom_point(aes(split_third_cat, rt_mean, col = trialtype2), dodge.width = 0.5) + 
+  #geom_errorbar(aes(ymin = rt_mean - se, ymax  = rt_mean + se), width = 0, position = position_dodge(width = 0.5), size = 1) +
+  theme(legend.position = 0)
+
+#ggsave("rt_by_task_thirds.eps", width = 8.5, height = 4.5, path = figure_folder)
+```
+
+
+```{r Supplementary Figure 4b - differences scores - learning}
+# RT difference figure
+learning_across_thirds.p_wide <- spread(data = learning_across_thirds.p[trialtype2 != "neutral"], key = trialtype2, value = rt_mean)
+learning_across_thirds.p_wide[, rt_diff_inconsistent_consistent := inconsistent-consistent]
+learning_across_thirds.p_wide[, rt_diff_inconsistent_consistentRO := outliersZ(rt_diff_inconsistent_consistent, zCutOff = 3)]
+learning_across_thirds.p_wide%>%print(n=Inf)
+
+learning_across_thirds.p_wide[, sd(rt_diff_inconsistent_consistent), by = split_third_cat]
+
+ggplot(learning_across_thirds.p_wide, aes(split_third_cat, rt_diff_inconsistent_consistent, col = split_third_cat)) + 
+  geom_violin(scale="width", trim=TRUE) + 
+  geom_quasirandom() +
+  ggtheme + 
+  stat_summary(color = "black", size =.5) + 
+  labs(y = "RT differences on inconsistent \nversus consistent trials (ms)", col = " ", x = " ") + 
+  scale_x_discrete(labels = c("first third", "middle third", "last third")) +
+  scale_color_manual(values = c("hotpink", "hotpink3", "hotpink4"), labels = 
+                       c("first third", "middle third", "last third")) +
+  theme(legend.position = 0)
+#ggsave("rt_by_task_thirds.eps", width = 8, height = 4.5, path = figure_folder)
+
+
+# overall across the task
+learning_across_task.p <- df[acc == 1, .(rt_mean = mean(rtResidual_ms, na.rm=T)), by = .(participant, trialtype2)]
+learning_across_task.p_wide <- spread(data=learning_across_task.p, key = trialtype2, value = rt_mean)
+learning_across_task.p_wide[, rt_diff_inconsistent_consistent := inconsistent-consistent]
+learning_across_task.p_wide[, outliersZ(rt_diff_inconsistent_consistent, zCutOff = 3)]
+ggplot(learning_across_task.p_wide, aes(participant, rt_diff_inconsistent_consistent)) + 
+  geom_point()
+```
+
+```{r NOT included - learning across thirds of hte task (by block)}
+
+# by block
+learning_across_thirds.p <- df[acc == 1, .(rt_mean = mean(rtResidual_ms, na.rm=T)), by = .(participant, block_num, trialtype2)]
+learning_across_thirds.p_summary <- seWithin(measurevar = "rt_mean", withinvars = c("trialtype2", "block_num"), idvar = "participant", data = learning_across_thirds.p)
+
+ggplot(learning_across_thirds.p_summary[trialtype2 != "neutral"], aes(block_num, rt_mean, col = trialtype2)) + 
+  geom_point(position = position_dodge(0.5)) + 
+  geom_errorbar(aes(ymin = rt_mean - se, ymax  = rt_mean + se), width = 0, position = position_dodge(width = 0.5)) +
+  ggtheme +
+  labs(y = "Response time (ms)", x = "Task third") + 
+  scale_x_discrete(breaks = c("first third", "middle third", "last third")) + 
+  scale_color_manual(values = c("lightseagreen",  "violetred3")) 
+```
+
+```{r Supplementary Figure 5 -flanker bias scores across the last two thirds of the task}
+
+
+ggplot(flanker_indices_rt_2thirds, aes(" ", flanker_score_2thirds)) +
+  geom_violin(scale="width", trim=TRUE, color = "purple", size = 1) +
+  geom_quasirandom(color = "purple", alpha = 0.5, fill = "purple", size = 2.5, width = .4) +
+  stat_summary() +
+  ggtheme +
+  labs(y = "Flanker RT index \n(inconsistent-consistent RT; ms)", x = " " ) 
+
+#ggsave(height = 5, width = 5, filename = "violin_flanker_indices_last_2thirds.png", path = figure_folder)
+
+
+# learning line figure
+flanker_indices_rt_by_third$split_third_cat <- factor(flanker_indices_rt_by_third$split_third_cat, levels = c("first", "middle", "last"))
+ggplot(flanker_indices_rt_by_third[split_third_cat %in% c("first", "last")], aes(as.factor(split_third_cat), flanker_score, color = as.factor(split_third_cat))) +
+  #geom_jitter() +
+  ggtheme +
+  theme(legend.position="none") +
+  geom_line(aes(group = as.factor(participant), col = as.factor(participant)), alpha = 0.2) 
+```
+
+```{r Suppl Figure 6 - Flanker bias correlation above versus below zero}
+ggplot(flanker_indices_rt[flanker_score_2thirds > 0], 
+       aes(flanker_score_2thirds, percent_out *100)) +
+geom_point(color  = "purple") +
+  ggtheme +
+  labs(x = "Flanker bias scores during the \nlast two thirds of the task", y = "% Time out of zone") +
+  geom_smooth(formula = y ~ x, method = "lm", color = "black") 
+
+#ggsave("corr_flanker_percentout_learners_supl.png", height=5.5, width = 5.5, path = figure_folder)
+```
+
+```{r Suppl figure }
+ggplot(flanker_indices_rt[ !is.na(flanker_score) & !is.na(percent_out_dev_neutral)],
+       aes( percent_out_dev_neutral * 100, flanker_score)) +
+  geom_point(color = "purple") +
+  stat_smooth(method = "lm", formula = y ~ x, color = "black") +
+  ggtheme +
+  labs(x = "Time out of the zone (%)", y = "Flanker bias scores \n(Inconsistent minus consistent RT)")
+
+#ggsave("corr_flanker_percentout_exploratory.png", height= 4.2, width = 4.2, path = figure_folder)
+```
+
+```{r Suppl figure }
+summarized_df = df[trialtype2 %in% c("consistent", "inconsistent") & acc == 1, .(rtResidual = mean(rtResidual, na.rm=T)), by = .(participant, trialtype2, rtResidual, zone_smoothed_deviance)]
+
+summarized_df_plot = seWithin(summarized_df, withinvars = c("trialtype2", "zone_smoothed_deviance"), measurevar = "rtResidual", idvar = "participant")
+
+ggplot(summarized_df_plot, aes(zone_smoothed_deviance, rtResidual, col = trialtype2)) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = rtResidual - se, ymax  = rtResidual + se), width = 0, size = 1.5) +
+  ggtheme +
+  labs(x = "Zone", y = "Response time (ms)") + 
+  scale_color_manual(breaks = c("In", "Out"), values = c("turquoise4", "hotpink"))+
+  scale_y_continuous(breaks = c(0.52, 0.56, 0.60, 0.64, 0.68), 
+                     labels = c(520, 560, 600, 640, 680))
+
+#ggsave("RT_zone_exploratory2.eps", height = 4, width = 4.5, path = figure_folder)
+```
